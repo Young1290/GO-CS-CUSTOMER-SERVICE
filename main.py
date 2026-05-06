@@ -4,6 +4,7 @@ import argparse
 import cgi
 import json
 import math
+import os
 import re
 import sqlite3
 import threading
@@ -46,6 +47,32 @@ TOKEN_CANONICAL = {
     "fees": "price",
     "refunds": "refund",
 }
+
+
+def load_env_file(path: Path) -> None:
+    if not path.exists():
+        return
+    for line in path.read_text(encoding="utf-8", errors="ignore").splitlines():
+        raw = line.strip()
+        if not raw or raw.startswith("#") or "=" not in raw:
+            continue
+        k, v = raw.split("=", 1)
+        key = k.strip()
+        value = v.strip().strip("'").strip('"')
+        if key and key not in os.environ:
+            os.environ[key] = value
+
+
+def retrieval_provider() -> str:
+    return (os.getenv("GOCS_RETRIEVAL_PROVIDER", "local") or "local").strip().lower()
+
+
+def data_engine_endpoint() -> str:
+    return (os.getenv("GOCS_DATA_ENGINE_ENDPOINT", "") or "").strip()
+
+
+def data_engine_enabled() -> bool:
+    return retrieval_provider() in {"data_engine", "hybrid"} and bool(data_engine_endpoint())
 
 
 def extract_uploaded_text(filename: str, content_type: str, file_bytes: bytes) -> str:
@@ -303,7 +330,16 @@ class GoCSHandler(SimpleHTTPRequestHandler):
 
         if path.startswith("/api/"):
             if path == "/api/health":
-                return self._send_json(ok({"status": "ok", "db_path": str(DB_PATH)}))
+                return self._send_json(
+                    ok(
+                        {
+                            "status": "ok",
+                            "db_path": str(DB_PATH),
+                            "retrieval_provider": retrieval_provider(),
+                            "data_engine_enabled": data_engine_enabled(),
+                        }
+                    )
+                )
             if path.startswith("/api/bot/"):
                 token = path.split("/")[3] if len(path.split("/")) > 3 else ""
                 return self._handle_get_bot(token)
@@ -642,7 +678,7 @@ def conn_source_name(public_token: str) -> str | None:
         conn.close()
 
 
-def compute_answer(conn: sqlite3.Connection, bot_id: str, message: str, fallback_message: str, threshold: float) -> dict:
+def compute_answer_local(conn: sqlite3.Connection, bot_id: str, message: str, fallback_message: str, threshold: float) -> dict:
     rows = conn.execute(
         """
         select kc.id as chunk_id, kc.chunk_text, kc.embedding, coalesce(kf.file_name, '') as file_name
@@ -737,7 +773,33 @@ def compute_answer(conn: sqlite3.Connection, bot_id: str, message: str, fallback
         "needs_human": not answered,
         "sources": sources,
         "source_text": answer_text if answered else None,
+        "retrieval_provider": "local",
     }
+
+
+def compute_answer_data_engine(conn: sqlite3.Connection, bot_id: str, message: str, fallback_message: str, threshold: float) -> dict | None:
+    """
+    Placeholder integration point for external Data Engine retrieval.
+    Current behavior:
+    - returns None so caller can fallback to local retrieval
+    - keeps API contract stable while Data Engine client is introduced later
+    """
+    if not data_engine_enabled():
+        return None
+    return None
+
+
+def compute_answer(conn: sqlite3.Connection, bot_id: str, message: str, fallback_message: str, threshold: float) -> dict:
+    provider = retrieval_provider()
+    if provider in {"data_engine", "hybrid"}:
+        ext = compute_answer_data_engine(conn, bot_id, message, fallback_message, threshold)
+        if ext:
+            ext.setdefault("retrieval_provider", "data_engine")
+            return ext
+        local = compute_answer_local(conn, bot_id, message, fallback_message, threshold)
+        local["retrieval_provider"] = "local_fallback"
+        return local
+    return compute_answer_local(conn, bot_id, message, fallback_message, threshold)
 
 
 def main() -> None:
@@ -745,6 +807,7 @@ def main() -> None:
     parser.add_argument("--port", type=int, default=3000, help="HTTP port (default: 3000)")
     args = parser.parse_args()
 
+    load_env_file(ROOT / ".env")
     ensure_db()
 
     with ThreadingTCPServer(("127.0.0.1", args.port), GoCSHandler) as httpd:

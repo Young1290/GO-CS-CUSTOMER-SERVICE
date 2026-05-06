@@ -1,8 +1,8 @@
 # GO!CS Prototype
 
-Lightweight frontend prototype for GO!CS flow: `Upload -> Generate -> Test -> Share`.
+Lightweight full-stack prototype for GO!CS flow: `Upload -> Generate -> Test -> Share`.
 
-This repo is intentionally backend-free and optimized for quick product/demo iteration.
+This repo is optimized for quick product/demo iteration while keeping API/database behavior close to the PRD.
 
 ## 1) Quick Start
 
@@ -34,6 +34,9 @@ Stop server with `Ctrl+C`.
 - Frontend is loaded via script tags in `index.html` and compiled in-browser using Babel.
 - Session state is stored in browser `localStorage` under `gocs_demo_session`.
 - SQLite database is auto-initialized at startup as `gocs.db`.
+- Retrieval provider is configurable for future Data Engine integration:
+  - `GOCS_RETRIEVAL_PROVIDER=local|data_engine|hybrid`
+  - `GOCS_DATA_ENGINE_ENDPOINT=<future endpoint>`
 
 ## 3) Route Map
 
@@ -66,12 +69,13 @@ Stop server with `Ctrl+C`.
 
 1. No auth/workspace/billing layer yet.
 2. File upload parsing/chunking is simplified (basic ingestion + heuristic retrieval).
-3. Retrieval uses lightweight local vector similarity (hashed embedding) with keyword fallback; no external vector DB yet.
-4. Telegram connection is stored as placeholder config; no external Telegram API registration yet.
-5. WhatsApp/Facebook options are placeholder UI only.
-6. Widget endpoint returns bootstrap JS only (no production widget bundle).
-7. External CDN dependency means offline mode is not supported by default.
-8. Uses in-browser Babel transform (fine for prototype, not production).
+3. Retrieval uses lightweight local vector similarity (hashed embedding) with keyword fallback.
+4. Data Engine provider path is prepared but external Data Engine calls are intentionally not enabled yet.
+5. Telegram connection is stored as placeholder config; no external Telegram API registration yet.
+6. WhatsApp/Facebook options are placeholder UI only.
+7. Widget endpoint returns bootstrap JS only (no production widget bundle).
+8. External CDN dependency means offline mode is not supported by default.
+9. Uses in-browser Babel transform (fine for prototype, not production).
 
 File extraction note:
 1. `txt/md/csv/json/log` uploads are parsed directly.

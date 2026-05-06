@@ -39,7 +39,24 @@ Open each route directly and confirm it loads:
 Expected behavior:
 
 - All routes return app UI (SPA fallback works).
-- `/api/*` and `/widget/*` return 404 from server by design.
+- Core backend endpoints are reachable:
+  - `GET /api/health`
+  - `POST /api/generate-bot`
+  - `GET /api/bot/:publicToken`
+  - `POST /api/bot/:publicToken/ask`
+  - `GET /widget/:publicToken.js`
+
+## Retrieval Provider Config
+
+Optional `.env` keys:
+
+1. `GOCS_RETRIEVAL_PROVIDER=local|data_engine|hybrid`
+2. `GOCS_DATA_ENGINE_ENDPOINT=<future endpoint>`
+
+Current behavior:
+
+1. `local` uses in-process vector+keyword retrieval.
+2. `data_engine`/`hybrid` are integration-ready modes and currently fallback to local retrieval until Data Engine client is wired.
 
 ## Demo Validation Script (Manual)
 
