@@ -1,0 +1,41 @@
+name: Smoke Test
+
+on:
+  push:
+    branches: [ master ]
+  pull_request:
+    branches: [ master ]
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+
+      - name: Compile check
+        run: |
+          python -m py_compile main.py scripts/smoke_milestone_apis.py
+
+      - name: Start app
+        run: |
+          nohup python main.py --port 3000 > server.log 2>&1 &
+          sleep 2
+
+      - name: Run smoke
+        run: |
+          python scripts/smoke_milestone_apis.py --base-url http://127.0.0.1:3000
+
+      - name: Show server log on failure
+        if: failure()
+        run: cat server.log

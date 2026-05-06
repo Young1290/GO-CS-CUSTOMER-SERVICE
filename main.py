@@ -8,6 +8,7 @@ import os
 import re
 import sqlite3
 import threading
+import time
 import uuid
 import zipfile
 from collections import Counter
@@ -29,6 +30,8 @@ FALLBACK_MESSAGE = (
 )
 
 DB_LOCK = threading.Lock()
+RATE_LOCK = threading.Lock()
+RATE_STATE: dict[str, list[float]] = {}
 WORD_RE = re.compile(r"[a-z0-9]+")
 STOPWORDS = {
     "a", "an", "and", "are", "as", "at", "be", "by", "for", "from", "how", "i", "in", "is", "it", "of",
@@ -50,6 +53,45 @@ TOKEN_CANONICAL = {
     "fees": "price",
     "refunds": "refund",
 }
+MAX_BODY_BYTES = int(os.getenv("GOCS_MAX_BODY_BYTES", str(5 * 1024 * 1024)))
+RATE_LIMIT_PER_MIN = int(os.getenv("GOCS_RATE_LIMIT_PER_MIN", "180"))
+DEFAULT_BIND_HOST = os.getenv("HOST", "0.0.0.0")
+CORS_ALLOW_ORIGIN = os.getenv("GOCS_CORS_ALLOW_ORIGIN", "*")
+
+
+def trim_rate_state(now_ts: float) -> None:
+    cutoff = now_ts - 60.0
+    stale_keys = []
+    for key, hits in RATE_STATE.items():
+        filtered = [ts for ts in hits if ts >= cutoff]
+        if filtered:
+            RATE_STATE[key] = filtered
+        else:
+            stale_keys.append(key)
+    for key in stale_keys:
+        RATE_STATE.pop(key, None)
+
+
+def allow_request(client_key: str) -> bool:
+    now_ts = time.time()
+    with RATE_LOCK:
+        trim_rate_state(now_ts)
+        hits = RATE_STATE.get(client_key, [])
+        if len(hits) >= RATE_LIMIT_PER_MIN:
+            RATE_STATE[client_key] = hits
+            return False
+        hits.append(now_ts)
+        RATE_STATE[client_key] = hits
+        return True
+
+
+def env_int(name: str, default: int, minimum: int, maximum: int) -> int:
+    raw = os.getenv(name, str(default))
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return default
+    return max(minimum, min(maximum, value))
 
 
 def load_env_file(path: Path) -> None:
@@ -76,6 +118,15 @@ def data_engine_endpoint() -> str:
 
 def data_engine_enabled() -> bool:
     return retrieval_provider() in {"data_engine", "hybrid"} and bool(data_engine_endpoint())
+
+
+def db_connect() -> sqlite3.Connection:
+    conn = sqlite3.connect(DB_PATH, timeout=10)
+    conn.execute("pragma foreign_keys = on")
+    conn.execute("pragma journal_mode = wal")
+    conn.execute("pragma synchronous = normal")
+    conn.execute("pragma busy_timeout = 5000")
+    return conn
 
 
 def extract_uploaded_text(filename: str, content_type: str, file_bytes: bytes) -> str:
@@ -137,7 +188,7 @@ def err(code: str, message: str, details: list[dict] | None = None) -> dict:
 
 def ensure_db() -> None:
     with DB_LOCK:
-        conn = sqlite3.connect(DB_PATH)
+        conn = db_connect()
         try:
             conn.executescript(
                 """
@@ -300,6 +351,37 @@ class GoCSHandler(SimpleHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def end_headers(self) -> None:
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("X-Frame-Options", "SAMEORIGIN")
+        self.send_header("Referrer-Policy", "strict-origin-when-cross-origin")
+        self.send_header("Permissions-Policy", "geolocation=(), microphone=(), camera=()")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Access-Control-Allow-Origin", CORS_ALLOW_ORIGIN)
+        self.send_header("Vary", "Origin")
+        super().end_headers()
+
+    def _client_key(self) -> str:
+        return self.client_address[0] if self.client_address else "unknown"
+
+    def _check_api_guards(self) -> bool:
+        client = self._client_key()
+        if not allow_request(client):
+            self._send_json(err("RATE_LIMITED", "Too many requests. Please retry shortly."), HTTPStatus.TOO_MANY_REQUESTS)
+            return False
+        length = int(self.headers.get("Content-Length", "0") or "0")
+        if length > MAX_BODY_BYTES:
+            self._send_json(
+                err(
+                    "PAYLOAD_TOO_LARGE",
+                    f"Payload exceeds limit of {MAX_BODY_BYTES} bytes.",
+                    [{"field": "body", "issue": "too_large"}],
+                ),
+                HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
+            )
+            return False
+        return True
+
     def _read_json(self) -> dict | None:
         length = int(self.headers.get("Content-Length", "0"))
         if length <= 0:
@@ -338,56 +420,78 @@ class GoCSHandler(SimpleHTTPRequestHandler):
         return data, file_meta
 
     def do_GET(self) -> None:
-        parsed = urlparse(self.path)
-        path = parsed.path
+        try:
+            parsed = urlparse(self.path)
+            path = parsed.path
 
-        if path.startswith("/api/"):
-            if path == "/api/health":
-                return self._send_json(
-                    ok(
-                        {
-                            "status": "ok",
-                            "db_path": str(DB_PATH),
-                            "retrieval_provider": retrieval_provider(),
-                            "data_engine_enabled": data_engine_enabled(),
-                        }
+            if path.startswith("/api/"):
+                if not self._check_api_guards():
+                    return
+                if path == "/api/health":
+                    return self._send_json(
+                        ok(
+                            {
+                                "status": "ok",
+                                "db_path": str(DB_PATH),
+                                "retrieval_provider": retrieval_provider(),
+                                "data_engine_enabled": data_engine_enabled(),
+                                "limits": {
+                                    "max_body_bytes": MAX_BODY_BYTES,
+                                    "rate_limit_per_min": RATE_LIMIT_PER_MIN,
+                                },
+                            }
+                        )
                     )
-                )
-            if path.startswith("/api/bot/"):
-                token = path.split("/")[3] if len(path.split("/")) > 3 else ""
-                return self._handle_get_bot(token)
-            return self._send_json(err("NOT_FOUND", "Endpoint not found"), HTTPStatus.NOT_FOUND)
+                if path.startswith("/api/bot/"):
+                    token = path.split("/")[3] if len(path.split("/")) > 3 else ""
+                    return self._handle_get_bot(token)
+                return self._send_json(err("NOT_FOUND", "Endpoint not found"), HTTPStatus.NOT_FOUND)
 
-        if path.startswith("/widget/") and path.endswith(".js"):
-            token = path.split("/")[2].replace(".js", "")
-            return self._handle_widget(token)
+            if path.startswith("/widget/") and path.endswith(".js"):
+                token = path.split("/")[2].replace(".js", "")
+                return self._handle_widget(token)
 
-        requested = self.translate_path(path)
-        if Path(requested).exists() and not Path(requested).is_dir():
+            requested = self.translate_path(path)
+            if Path(requested).exists() and not Path(requested).is_dir():
+                return super().do_GET()
+
+            self.path = "/index.html"
             return super().do_GET()
-
-        self.path = "/index.html"
-        return super().do_GET()
+        except Exception:
+            return self._send_json(err("INTERNAL_ERROR", "Unexpected server error"), HTTPStatus.INTERNAL_SERVER_ERROR)
 
     def do_POST(self) -> None:
-        parsed = urlparse(self.path)
-        path = parsed.path
+        try:
+            parsed = urlparse(self.path)
+            path = parsed.path
+            if path.startswith("/api/"):
+                if not self._check_api_guards():
+                    return
 
-        if path == "/api/generate-bot":
-            return self._handle_generate_bot()
+            if path == "/api/generate-bot":
+                return self._handle_generate_bot()
 
-        if path.startswith("/api/bot/") and path.endswith("/ask"):
-            token = path.split("/")[3] if len(path.split("/")) > 3 else ""
-            return self._handle_ask(token)
+            if path.startswith("/api/bot/") and path.endswith("/ask"):
+                token = path.split("/")[3] if len(path.split("/")) > 3 else ""
+                return self._handle_ask(token)
 
-        if path == "/api/telegram/connect":
-            return self._handle_telegram_connect()
+            if path == "/api/telegram/connect":
+                return self._handle_telegram_connect()
 
-        if path.startswith("/api/webhooks/telegram/"):
-            token = path.split("/")[-1]
-            return self._handle_telegram_webhook(token)
+            if path.startswith("/api/webhooks/telegram/"):
+                token = path.split("/")[-1]
+                return self._handle_telegram_webhook(token)
 
-        return self._send_json(err("NOT_FOUND", "Endpoint not found"), HTTPStatus.NOT_FOUND)
+            return self._send_json(err("NOT_FOUND", "Endpoint not found"), HTTPStatus.NOT_FOUND)
+        except Exception:
+            return self._send_json(err("INTERNAL_ERROR", "Unexpected server error"), HTTPStatus.INTERNAL_SERVER_ERROR)
+
+    def do_OPTIONS(self) -> None:
+        self.send_response(HTTPStatus.NO_CONTENT)
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization")
+        self.send_header("Access-Control-Max-Age", "86400")
+        self.end_headers()
 
     def _handle_generate_bot(self) -> None:
         ctype = self.headers.get("Content-Type", "").lower()
@@ -436,7 +540,7 @@ class GoCSHandler(SimpleHTTPRequestHandler):
         ]
 
         with DB_LOCK:
-            conn = sqlite3.connect(DB_PATH)
+            conn = db_connect()
             try:
                 conn.execute(
                     """
@@ -514,7 +618,7 @@ class GoCSHandler(SimpleHTTPRequestHandler):
 
     def _handle_get_bot(self, public_token: str) -> None:
         with DB_LOCK:
-            conn = sqlite3.connect(DB_PATH)
+            conn = db_connect()
             conn.row_factory = sqlite3.Row
             try:
                 row = conn.execute("select * from bots where public_token = ?", (public_token,)).fetchone()
@@ -554,7 +658,7 @@ class GoCSHandler(SimpleHTTPRequestHandler):
             return self._send_json(err("VALIDATION_ERROR", "message is required", [{"field": "message", "issue": "required"}]), HTTPStatus.BAD_REQUEST)
 
         with DB_LOCK:
-            conn = sqlite3.connect(DB_PATH)
+            conn = db_connect()
             conn.row_factory = sqlite3.Row
             try:
                 bot = conn.execute("select * from bots where public_token = ?", (public_token,)).fetchone()
@@ -630,7 +734,7 @@ class GoCSHandler(SimpleHTTPRequestHandler):
             )
 
         with DB_LOCK:
-            conn = sqlite3.connect(DB_PATH)
+            conn = db_connect()
             conn.row_factory = sqlite3.Row
             try:
                 bot = conn.execute("select * from bots where public_token = ?", (public_token,)).fetchone()
@@ -672,7 +776,7 @@ class GoCSHandler(SimpleHTTPRequestHandler):
 
 
 def conn_source_name(public_token: str) -> str | None:
-    conn = sqlite3.connect(DB_PATH)
+    conn = db_connect()
     conn.row_factory = sqlite3.Row
     try:
         row = conn.execute(
@@ -815,17 +919,29 @@ def compute_answer(conn: sqlite3.Connection, bot_id: str, message: str, fallback
     return compute_answer_local(conn, bot_id, message, fallback_message, threshold)
 
 
+class ReusableThreadingTCPServer(ThreadingTCPServer):
+    allow_reuse_address = True
+    daemon_threads = True
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run GO!CS prototype locally (frontend + API + DB).")
     parser.add_argument("--port", type=int, default=3000, help="HTTP port (default: 3000)")
+    parser.add_argument("--host", type=str, default="", help="Bind host (default from HOST env or 0.0.0.0)")
     args = parser.parse_args()
 
     load_env_file(ROOT / ".env")
+    global MAX_BODY_BYTES, RATE_LIMIT_PER_MIN, CORS_ALLOW_ORIGIN
+    MAX_BODY_BYTES = env_int("GOCS_MAX_BODY_BYTES", 5 * 1024 * 1024, 1024, 50 * 1024 * 1024)
+    RATE_LIMIT_PER_MIN = env_int("GOCS_RATE_LIMIT_PER_MIN", 180, 10, 10000)
+    CORS_ALLOW_ORIGIN = (os.getenv("GOCS_CORS_ALLOW_ORIGIN", "*") or "*").strip()
+    bind_host = (args.host or os.getenv("HOST", DEFAULT_BIND_HOST) or DEFAULT_BIND_HOST).strip()
     ensure_db()
 
-    with ThreadingTCPServer(("127.0.0.1", args.port), GoCSHandler) as httpd:
-        print(f"GO!CS prototype running at http://127.0.0.1:{args.port}")
+    with ReusableThreadingTCPServer((bind_host, args.port), GoCSHandler) as httpd:
+        print(f"GO!CS prototype running at http://{bind_host}:{args.port}")
         print(f"SQLite database ready at: {DB_PATH}")
+        print(f"API limits: max_body_bytes={MAX_BODY_BYTES}, rate_limit_per_min={RATE_LIMIT_PER_MIN}")
         try:
             httpd.serve_forever()
         except KeyboardInterrupt:

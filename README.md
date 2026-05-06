@@ -10,6 +10,7 @@ This repo is optimized for quick product/demo iteration while keeping API/databa
 
 - Python 3.9+ available in `PATH`
 - Internet access for CDN assets (React, ReactDOM, Babel, Google Fonts)
+- Optional: `pypdf` for improved PDF extraction (`pip install -r requirements.txt`)
 
 ### Run
 
@@ -25,6 +26,19 @@ http://127.0.0.1:3000
 
 Stop server with `Ctrl+C`.
 
+Optional local-only bind:
+
+```bash
+python main.py --host 127.0.0.1 --port 3000
+```
+
+### Docker Run
+
+```bash
+docker build -t gocs-prototype .
+docker run --rm -p 3000:3000 -e PORT=3000 gocs-prototype
+```
+
 ## 2) How This Prototype Works
 
 - `main.py` serves files from repo root and provides SPA fallback to `index.html`.
@@ -37,6 +51,10 @@ Stop server with `Ctrl+C`.
 - Retrieval provider is configurable for future Data Engine integration:
   - `GOCS_RETRIEVAL_PROVIDER=local|data_engine|hybrid`
   - `GOCS_DATA_ENGINE_ENDPOINT=<future endpoint>`
+- Basic API protections:
+  - per-IP rate limiting (`GOCS_RATE_LIMIT_PER_MIN`, default `180`)
+  - request size limit (`GOCS_MAX_BODY_BYTES`, default `5242880`)
+  - CORS allow origin (`GOCS_CORS_ALLOW_ORIGIN`, default `*`)
 
 ## 3) Route Map
 
@@ -110,3 +128,15 @@ For operations and troubleshooting, see [RUNBOOK.md](/d:/LDE%20Customer%20Servic
    - share/connect form validation
 7. Productionize frontend build (Vite/Next/etc.) and remove in-browser Babel.
 8. Add observability (API logs, latency, error rates, fallback rate, unsafe query rate).
+
+## 8) Deployment Notes
+
+1. `Procfile` is included for PaaS process launch.
+2. `Dockerfile` and `.dockerignore` are included for container deployments.
+3. CI smoke workflow runs in GitHub Actions on push/PR (`.github/workflows/smoke.yml`).
+4. Runtime configuration can be supplied by environment variables:
+   - `HOST` (default `0.0.0.0`)
+   - `PORT` (default `3000`)
+   - `GOCS_RATE_LIMIT_PER_MIN` (default `180`)
+   - `GOCS_MAX_BODY_BYTES` (default `5242880`)
+   - `GOCS_CORS_ALLOW_ORIGIN` (default `*`)

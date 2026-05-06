@@ -272,6 +272,25 @@ python scripts/smoke_milestone_apis.py --base-url http://127.0.0.1:3000
   - Widget JS contains the created `publicToken` and JavaScript content type
 - Process exits with code `1`.
 
+## API Guardrail Tests (Release Safety)
+
+### GR-01 Rate Limit (429)
+- Setup:
+  - Start server with `GOCS_RATE_LIMIT_PER_MIN=10`.
+- Steps:
+  1. Call `GET /api/health` 11 times within 60 seconds from same client IP.
+- Expected:
+  - First 10 requests return `200`.
+  - 11th request returns `429` with error code `RATE_LIMITED`.
+
+### GR-02 Payload Limit (413)
+- Setup:
+  - Start server with `GOCS_MAX_BODY_BYTES=1024`.
+- Steps:
+  1. Send `POST /api/generate-bot` with JSON body larger than 1024 bytes.
+- Expected:
+  - Returns `413` with error code `PAYLOAD_TOO_LARGE`.
+
 ## Test Execution Record Template
 - Build/Commit:
 - Test date:

@@ -50,6 +50,7 @@
 - `BOT_NOT_READY` -> 409
 - `UNSUPPORTED_MEDIA_TYPE` -> 415
 - `RATE_LIMITED` -> 429
+- `PAYLOAD_TOO_LARGE` -> 413
 - `TELEGRAM_CONNECT_FAILED` -> 502
 - `INTERNAL_ERROR` -> 500
 
@@ -170,6 +171,32 @@ Fetch bot profile and readiness for test/share pages.
     "knowledge_file_count": 1,
     "created_at": "2026-05-07T10:15:03.124Z",
     "updated_at": "2026-05-07T10:16:41.124Z"
+  },
+  "meta": {
+    "request_id": "req_01JZ6AN8Q39A2P7D1E4M",
+    "timestamp": "2026-05-07T10:16:45.124Z"
+  }
+}
+```
+
+## 3.5) GET `/api/health`
+
+Service health and runtime config visibility endpoint.
+
+### Response 200
+
+```json
+{
+  "ok": true,
+  "data": {
+    "status": "ok",
+    "db_path": "/app/gocs.db",
+    "retrieval_provider": "local",
+    "data_engine_enabled": false,
+    "limits": {
+      "max_body_bytes": 5242880,
+      "rate_limit_per_min": 180
+    }
   },
   "meta": {
     "request_id": "req_01JZ6AN8Q39A2P7D1E4M",
