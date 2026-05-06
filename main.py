@@ -31,6 +31,33 @@ STOPWORDS = {
 }
 
 
+def extract_uploaded_text(filename: str, content_type: str, file_bytes: bytes) -> str:
+    name = (filename or "").lower()
+    if not file_bytes:
+        return ""
+
+    if name.endswith((".txt", ".md", ".csv", ".json", ".log")):
+        return file_bytes.decode("utf-8", errors="ignore")
+
+    if name.endswith(".pdf"):
+        try:
+            from io import BytesIO
+            from pypdf import PdfReader  # type: ignore
+
+            reader = PdfReader(BytesIO(file_bytes))
+            pages = []
+            for p in reader.pages:
+                text = p.extract_text() or ""
+                if text.strip():
+                    pages.append(text.strip())
+            return "\n\n".join(pages)
+        except Exception:
+            return file_bytes.decode("utf-8", errors="ignore")
+
+    # Best-effort fallback for unsupported binary types.
+    return file_bytes.decode("utf-8", errors="ignore")
+
+
 def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -211,7 +238,11 @@ class GoCSHandler(SimpleHTTPRequestHandler):
                     "filename": str(file_item.filename),
                     "content_type": str(getattr(file_item, "type", "") or ""),
                     "bytes": file_bytes,
-                    "text": file_bytes.decode("utf-8", errors="ignore"),
+                    "text": extract_uploaded_text(
+                        str(file_item.filename),
+                        str(getattr(file_item, "type", "") or ""),
+                        file_bytes,
+                    ),
                 }
         return data, file_meta
 

@@ -72,6 +72,10 @@ Stop server with `Ctrl+C`.
 7. External CDN dependency means offline mode is not supported by default.
 8. Uses in-browser Babel transform (fine for prototype, not production).
 
+File extraction note:
+1. `txt/md/csv/json/log` uploads are parsed directly.
+2. `pdf` extraction is attempted when `pypdf` is installed; otherwise fallback decoding is used.
+
 ## 6) Execution Checklist (Demo)
 
 1. Start server and open `/`.
