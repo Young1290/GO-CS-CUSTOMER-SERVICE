@@ -57,7 +57,7 @@ Stop server with `Ctrl+C`.
 - `app.jsx` - App shell, route parsing, navigation, and service wiring (`api` mode by default)
 - `pages.jsx` - Landing/generation/chat/share/public page components
 - `chat-data.jsx` - Mock knowledge base and matching logic
-- `gocs-service.jsx` - Stable API-preserving service interface (mock adapter now, API adapter later)
+- `gocs-service.jsx` - Service interface with both mock and API adapters; generate flow supports multipart (`file`) and JSON fallback.
 - `gocs.css` - All prototype styling
 - `browser-window.jsx`, `tweaks-panel.jsx` - Demo chrome and tweak controls
 
@@ -89,11 +89,9 @@ For operations and troubleshooting, see [RUNBOOK.md](/d:/LDE%20Customer%20Servic
 
 ## 7) Next Implementation Steps
 
-1. Replace mock adapter internals in `gocs-service.jsx` with real API calls:
-   - `POST /api/generate-bot`
-   - `GET /api/bot/:publicToken`
-   - `POST /api/bot/:publicToken/ask`
-   - `POST /api/telegram/connect`
+1. Harden API integration coverage in `gocs-service.jsx`:
+   - Keep envelope normalization resilient for non-JSON/partial backend failures
+   - Extend contract validation and client-side error surfacing for `/api/*` flows
 2. Add real document ingestion pipeline (PDF/DOC/TXT parse + chunk + embed + retrieval).
 3. Add backend session and bot persistence with durable IDs/tokens.
 4. Add auth/org workspace model for bot ownership.

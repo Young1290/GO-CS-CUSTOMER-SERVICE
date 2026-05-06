@@ -18,6 +18,33 @@ function gocsError(code, message, details = []) {
   return { ok: false, error: { code, message, details }, meta: gocsNowMeta() };
 }
 
+function normalizeEnvelope(body, res = null) {
+  if (body && typeof body === 'object' && typeof body.ok === 'boolean') {
+    return body;
+  }
+  if (res && res.ok) {
+    return gocsSuccess(body || {});
+  }
+  const status = res?.status || 0;
+  return gocsError('API_ERROR', `API request failed${status ? ` (${status})` : ''}.`);
+}
+
+function serializeSettings(settings) {
+  if (!settings || typeof settings !== 'object') return null;
+  try {
+    return JSON.stringify(settings);
+  } catch (e) {
+    return null;
+  }
+}
+
+function appendIfPresent(formData, key, value) {
+  if (value === undefined || value === null) return;
+  const str = String(value);
+  if (!str.trim()) return;
+  formData.append(key, str);
+}
+
 function readSessionFallback() {
   try {
     return JSON.parse(localStorage.getItem(GOCS_SESSION_STORAGE_KEY)) || null;
@@ -153,10 +180,21 @@ function createMockAdapter() {
 async function fetchJson(url, options = {}) {
   try {
     const res = await fetch(url, options);
-    const body = await res.json();
-    return body;
+    const contentType = res.headers.get('content-type') || '';
+    let body = null;
+    if (contentType.includes('application/json')) {
+      body = await res.json();
+    } else {
+      const text = await res.text();
+      try {
+        body = text ? JSON.parse(text) : null;
+      } catch (e) {
+        body = text ? { message: text } : null;
+      }
+    }
+    return normalizeEnvelope(body, res);
   } catch (e) {
-    return gocsError('NETWORK_ERROR', 'Unable to reach API server.');
+    return gocsError('NETWORK_ERROR', e?.message || 'Unable to reach API server.');
   }
 }
 
@@ -171,11 +209,27 @@ function createApiAdapter() {
         tone: payload.tone,
         settings: payload.settings,
       };
-      const result = await fetchJson('/api/generate-bot', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(apiPayload),
-      });
+      let result;
+      if (payload.file instanceof File) {
+        const formData = new FormData();
+        formData.append('file', payload.file, payload.file.name || payload.fileName || 'upload.txt');
+        appendIfPresent(formData, 'pasted_text', payload.pasted_text);
+        appendIfPresent(formData, 'owner_email', payload.owner_email);
+        appendIfPresent(formData, 'business_type', payload.business_type);
+        appendIfPresent(formData, 'tone', payload.tone);
+        const settingsJson = serializeSettings(payload.settings);
+        if (settingsJson) formData.append('settings', settingsJson);
+        result = await fetchJson('/api/generate-bot', {
+          method: 'POST',
+          body: formData,
+        });
+      } else {
+        result = await fetchJson('/api/generate-bot', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(apiPayload),
+        });
+      }
       if (result.ok && result.data?.session) {
         writeSession(result.data.session);
       }

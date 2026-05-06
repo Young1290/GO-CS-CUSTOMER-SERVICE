@@ -228,6 +228,50 @@
   - Any open Critical defects.
   - Any unreviewed High defect.
 
+## Automated API Smoke Test (Milestone Gate)
+
+### Purpose
+- Validate milestone backend APIs end-to-end against a running server:
+  - `POST /api/generate-bot`
+  - `GET /api/bot/:publicToken`
+  - `POST /api/bot/:publicToken/ask`
+  - `POST /api/telegram/connect`
+  - `GET /widget/:publicToken.js`
+
+### Script
+- Path: `scripts/smoke_milestone_apis.py`
+- Exit code:
+  - `0` = pass
+  - `1` = fail
+
+### Preconditions
+- Server is running and reachable (default `http://127.0.0.1:3000`).
+- API routes above are enabled in the running build.
+
+### Run Command
+```powershell
+python scripts/smoke_milestone_apis.py --base-url http://127.0.0.1:3000
+```
+
+### Optional Parameters
+- `--base-url`: override host/port/environment under test.
+- `--telegram-token`: override token for telegram connect call (default is a QA dummy token).
+
+### Pass Criteria
+- Script prints `PASS` for each of 5 steps.
+- Final line is `Smoke test completed successfully.`
+- Process exits with code `0`.
+
+### Fail Criteria
+- Any API call returns unexpected HTTP status.
+- Required response fields are missing/invalid:
+  - `public_token` from generate-bot
+  - Bot info token consistency
+  - Ask response includes `answer` and valid `status`
+  - Telegram response has `telegram.connected=true`
+  - Widget JS contains the created `publicToken` and JavaScript content type
+- Process exits with code `1`.
+
 ## Test Execution Record Template
 - Build/Commit:
 - Test date:

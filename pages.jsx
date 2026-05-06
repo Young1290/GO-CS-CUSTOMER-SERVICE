@@ -45,6 +45,7 @@ function Footer() {
 
 function LandingPage({ service, onGenerateStart, tone, businessType, setBusinessType, setTone }) {
   const [fileName, setFileName] = useState(null);
+  const [fileObj, setFileObj] = useState(null);
   const [pasteMode, setPasteMode] = useState(false);
   const [pasteText, setPasteText] = useState('');
   const [dragOver, setDragOver] = useState(false);
@@ -59,8 +60,25 @@ function LandingPage({ service, onGenerateStart, tone, businessType, setBusiness
   });
   const fileInput = useRef(null);
 
-  const fakeUpload = (name) => setFileName(name || 'Sakura_Ramen_Info.pdf');
+  const fakeUpload = (file) => {
+    if (!file) {
+      setFileObj(null);
+      setFileName(null);
+      return;
+    }
+    setFileObj(file);
+    setFileName(file.name || 'Sakura_Ramen_Info.pdf');
+  };
   const ready = Boolean(fileName || (pasteMode && pasteText.trim().length > 30));
+
+  const formatApiError = (res) => {
+    const message = res?.error?.message || 'Unable to create generation session. Please try again.';
+    const code = res?.error?.code ? ` [${res.error.code}]` : '';
+    const details = Array.isArray(res?.error?.details) && res.error.details.length
+      ? ` ${res.error.details.map((d) => `${d.field}: ${d.issue}`).join(', ')}`
+      : '';
+    return `${message}${code}${details}`;
+  };
 
   const handleGenerate = async () => {
     if (!ready || submitting) return;
@@ -68,6 +86,7 @@ function LandingPage({ service, onGenerateStart, tone, businessType, setBusiness
     setError('');
     try {
       const res = await service.generateBot({
+        file: fileObj,
         fileName,
         pasted_text: pasteText,
         business_type: businessType,
@@ -75,7 +94,7 @@ function LandingPage({ service, onGenerateStart, tone, businessType, setBusiness
         settings: rules,
       });
       if (!res.ok) {
-        setError(res.error?.message || 'Unable to create generation session. Please try again.');
+        setError(formatApiError(res));
         setSubmitting(false);
         return;
       }
@@ -108,10 +127,10 @@ function LandingPage({ service, onGenerateStart, tone, businessType, setBusiness
                 className={`gocs-drop ${dragOver ? 'is-over' : ''} ${fileName ? 'is-filled' : ''}`}
                 onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
                 onDragLeave={() => setDragOver(false)}
-                onDrop={(e) => { e.preventDefault(); setDragOver(false); fakeUpload(e.dataTransfer.files?.[0]?.name); }}
+                onDrop={(e) => { e.preventDefault(); setDragOver(false); fakeUpload(e.dataTransfer.files?.[0] || null); }}
                 onClick={() => !fileName && fileInput.current?.click()}
               >
-                <input ref={fileInput} type="file" hidden onChange={(e) => fakeUpload(e.target.files?.[0]?.name)} />
+                <input ref={fileInput} type="file" hidden onChange={(e) => fakeUpload(e.target.files?.[0] || null)} />
                 {fileName ? (
                   <div className="gocs-file">
                     <div className="gocs-file-icon">
@@ -121,7 +140,7 @@ function LandingPage({ service, onGenerateStart, tone, businessType, setBusiness
                       <div className="gocs-file-name">{fileName}</div>
                       <div className="gocs-file-sub">Ready for generation</div>
                     </div>
-                    <button className="gocs-file-x" onClick={(e) => { e.stopPropagation(); setFileName(null); }} aria-label="Remove">
+                    <button className="gocs-file-x" onClick={(e) => { e.stopPropagation(); setFileName(null); setFileObj(null); }} aria-label="Remove">
                       <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M18 6L6 18M6 6l12 12" /></svg>
                     </button>
                   </div>

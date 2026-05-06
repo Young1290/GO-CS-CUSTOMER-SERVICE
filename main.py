@@ -1,11 +1,13 @@
 ﻿from __future__ import annotations
 
 import argparse
+import cgi
 import json
+import re
 import sqlite3
 import threading
-import time
 import uuid
+from collections import Counter
 from datetime import datetime, timezone
 from http import HTTPStatus
 from http.server import SimpleHTTPRequestHandler
@@ -22,6 +24,11 @@ FALLBACK_MESSAGE = (
 )
 
 DB_LOCK = threading.Lock()
+WORD_RE = re.compile(r"[a-z0-9]+")
+STOPWORDS = {
+    "a", "an", "and", "are", "as", "at", "be", "by", "for", "from", "how", "i", "in", "is", "it", "of",
+    "on", "or", "that", "the", "this", "to", "we", "what", "when", "where", "who", "why", "with", "you", "your",
+}
 
 
 def now_iso() -> str:
@@ -124,6 +131,34 @@ def ensure_db() -> None:
             conn.close()
 
 
+def chunk_text(raw_text: str, chunk_size: int = 500, overlap: int = 100) -> list[str]:
+    text = (raw_text or "").strip()
+    if not text:
+        return []
+    chunks: list[str] = []
+    step = max(1, chunk_size - overlap)
+    for start in range(0, len(text), step):
+        piece = text[start : start + chunk_size].strip()
+        if piece:
+            chunks.append(piece)
+        if start + chunk_size >= len(text):
+            break
+    return chunks
+
+
+def tokenize(text: str) -> list[str]:
+    tokens = [t for t in WORD_RE.findall((text or "").lower()) if t not in STOPWORDS and len(t) > 1]
+    return tokens
+
+
+def confidence_label(confidence: float) -> str:
+    if confidence >= 0.8:
+        return "High Confidence"
+    if confidence >= 0.6:
+        return "Medium Confidence"
+    return "Not Enough Information"
+
+
 class GoCSHandler(SimpleHTTPRequestHandler):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, directory=str(ROOT), **kwargs)
@@ -156,6 +191,29 @@ class GoCSHandler(SimpleHTTPRequestHandler):
             return json.loads(raw.decode("utf-8"))
         except Exception:
             return None
+
+    def _read_multipart_form(self) -> tuple[dict, dict | None] | tuple[None, None]:
+        ctype = self.headers.get("Content-Type", "")
+        if "multipart/form-data" not in ctype.lower():
+            return None, None
+        form = cgi.FieldStorage(fp=self.rfile, headers=self.headers, environ={"REQUEST_METHOD": "POST"})
+        data: dict = {}
+        for key in ("pasted_text", "owner_email", "business_type", "tone", "settings", "fileName"):
+            if key in form and getattr(form[key], "value", None) is not None:
+                data[key] = str(form[key].value)
+
+        file_meta = None
+        if "file" in form:
+            file_item = form["file"]
+            if getattr(file_item, "filename", None):
+                file_bytes = file_item.file.read() if file_item.file else b""
+                file_meta = {
+                    "filename": str(file_item.filename),
+                    "content_type": str(getattr(file_item, "type", "") or ""),
+                    "bytes": file_bytes,
+                    "text": file_bytes.decode("utf-8", errors="ignore"),
+                }
+        return data, file_meta
 
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
@@ -199,15 +257,24 @@ class GoCSHandler(SimpleHTTPRequestHandler):
         return self._send_json(err("NOT_FOUND", "Endpoint not found"), HTTPStatus.NOT_FOUND)
 
     def _handle_generate_bot(self) -> None:
-        payload = self._read_json()
-        if payload is None:
-            return self._send_json(err("VALIDATION_ERROR", "Invalid JSON body"), HTTPStatus.BAD_REQUEST)
+        ctype = self.headers.get("Content-Type", "").lower()
+        file_meta = None
+        if "multipart/form-data" in ctype:
+            payload, file_meta = self._read_multipart_form()
+            if payload is None:
+                return self._send_json(err("VALIDATION_ERROR", "Invalid multipart form"), HTTPStatus.BAD_REQUEST)
+        else:
+            payload = self._read_json()
+            if payload is None:
+                return self._send_json(err("VALIDATION_ERROR", "Invalid JSON body"), HTTPStatus.BAD_REQUEST)
 
-        file_name = str(payload.get("fileName") or "").strip()
-        pasted_text = str(payload.get("pasted_text") or "").strip()
-        if not file_name and len(pasted_text) < 20:
+        file_name = str((payload or {}).get("fileName") or (file_meta or {}).get("filename") or "").strip()
+        pasted_text = str((payload or {}).get("pasted_text") or "").strip()
+        uploaded_text = str((file_meta or {}).get("text") or "").strip()
+        combined_text = "\n\n".join([part for part in [uploaded_text, pasted_text] if part]).strip()
+        if not file_name and not combined_text:
             return self._send_json(
-                err("VALIDATION_ERROR", "Either fileName or pasted_text is required", [{"field": "fileName|pasted_text", "issue": "missing_both"}]),
+                err("VALIDATION_ERROR", "Either file or pasted_text is required", [{"field": "file|pasted_text", "issue": "missing_both"}]),
                 HTTPStatus.BAD_REQUEST,
             )
 
@@ -218,7 +285,15 @@ class GoCSHandler(SimpleHTTPRequestHandler):
         business_type = str(payload.get("business_type") or "auto").lower()
         tone = str(payload.get("tone") or "friendly").lower()
         source_name = file_name or "Pasted_Company_Info.txt"
-        settings = payload.get("settings") or {}
+        settings_raw = payload.get("settings") if payload else {}
+        settings = {}
+        if isinstance(settings_raw, dict):
+            settings = settings_raw
+        elif isinstance(settings_raw, str) and settings_raw.strip():
+            try:
+                settings = json.loads(settings_raw)
+            except Exception:
+                settings = {}
         suggested = [
             "What services do you provide?",
             "What is your pricing?",
@@ -258,8 +333,25 @@ class GoCSHandler(SimpleHTTPRequestHandler):
                     insert into knowledge_files (id,bot_id,file_name,file_type,file_url,raw_text,status,created_at)
                     values (?,?,?,?,?,?,?,?)
                     """,
-                    (file_id, bot_id, source_name, "txt", None, pasted_text or "Uploaded file placeholder text", "processed", created),
+                    (file_id, bot_id, source_name, "txt", None, combined_text, "processed", created),
                 )
+                for idx, piece in enumerate(chunk_text(combined_text)):
+                    conn.execute(
+                        """
+                        insert into knowledge_chunks (id,bot_id,file_id,chunk_text,chunk_index,embedding,metadata,created_at)
+                        values (?,?,?,?,?,?,?,?)
+                        """,
+                        (
+                            str(uuid.uuid4()),
+                            bot_id,
+                            file_id,
+                            piece,
+                            idx,
+                            None,
+                            json.dumps({"strategy": "char_window", "chunk_size": 500, "overlap": 100}),
+                            created,
+                        ),
+                    )
                 conn.commit()
             finally:
                 conn.close()
@@ -335,31 +427,40 @@ class GoCSHandler(SimpleHTTPRequestHandler):
                 if not bot:
                     return self._send_json(err("NOT_FOUND", "Bot not found", [{"field": "publicToken", "issue": "not_found"}]), HTTPStatus.NOT_FOUND)
 
-                conv_id = payload.get("conversation_id") or str(uuid.uuid4())
-                existing = conn.execute("select id from conversations where id = ?", (conv_id,)).fetchone()
+                raw_conv_id = str(payload.get("conversation_id") or "").strip()
+                conv_id = raw_conv_id or str(uuid.uuid4())
+                existing = conn.execute("select id, bot_id from conversations where id = ?", (conv_id,)).fetchone()
                 now = now_iso()
                 if not existing:
                     conn.execute(
                         "insert into conversations (id,bot_id,channel,visitor_id,status,needs_human,created_at,updated_at) values (?,?,?,?,?,?,?,?)",
                         (conv_id, bot["id"], payload.get("channel", "web"), payload.get("visitor_id"), "open", 0, now, now),
                     )
+                elif existing["bot_id"] != bot["id"]:
+                    conv_id = str(uuid.uuid4())
+                    conn.execute(
+                        "insert into conversations (id,bot_id,channel,visitor_id,status,needs_human,created_at,updated_at) values (?,?,?,?,?,?,?,?)",
+                        (conv_id, bot["id"], payload.get("channel", "web"), payload.get("visitor_id"), "open", 0, now, now),
+                    )
+                elif payload.get("visitor_id"):
+                    conn.execute("update conversations set visitor_id = ?, updated_at = ? where id = ?", (payload.get("visitor_id"), now, conv_id))
 
                 conn.execute(
                     "insert into messages (id,conversation_id,sender_type,message_text,created_at) values (?,?,?,?,?)",
                     (str(uuid.uuid4()), conv_id, "user", message, now),
                 )
 
-                answer_data = compute_answer(message)
+                answer_data = compute_answer(conn, bot["id"], message, bot["fallback_message"] or FALLBACK_MESSAGE, float(bot["confidence_threshold"] or 0.7))
                 conn.execute(
                     "insert into messages (id,conversation_id,sender_type,message_text,confidence,confidence_label,source_text,needs_human,created_at) values (?,?,?,?,?,?,?,?,?)",
                     (
                         str(uuid.uuid4()),
                         conv_id,
                         "ai",
-                        " ".join(answer_data["answer"]) if isinstance(answer_data["answer"], list) else str(answer_data["answer"]),
+                        str(answer_data["answer"]),
                         answer_data["confidence"],
                         answer_data["confidence_label"],
-                        answer_data["source_text"],
+                        json.dumps(answer_data.get("sources", [])),
                         1 if answer_data["needs_human"] else 0,
                         now,
                     ),
@@ -456,55 +557,89 @@ def conn_source_name(public_token: str) -> str | None:
         conn.close()
 
 
-def compute_answer(message: str) -> dict:
-    lower = message.lower()
-    if "hour" in lower or "open" in lower:
+def compute_answer(conn: sqlite3.Connection, bot_id: str, message: str, fallback_message: str, threshold: float) -> dict:
+    rows = conn.execute(
+        """
+        select kc.id as chunk_id, kc.chunk_text, coalesce(kf.file_name, '') as file_name
+        from knowledge_chunks kc
+        left join knowledge_files kf on kf.id = kc.file_id
+        where kc.bot_id = ?
+        order by kc.chunk_index asc
+        """,
+        (bot_id,),
+    ).fetchall()
+    if not rows:
         return {
-            "answer": [
-                "We're open every day:",
-                "Mon-Thu: 11:30 AM to 9:30 PM",
-                "Fri-Sat: 11:30 AM to 10:30 PM",
-                "Sun: 12:00 PM to 9:00 PM",
-            ],
-            "confidence": 0.9,
-            "confidence_label": "High Confidence",
-            "status": "answered",
-            "source_used": True,
-            "needs_human": False,
-            "source_text": "Sakura_Ramen_Info.pdf · page 1 - Hours",
+            "answer": fallback_message,
+            "confidence": 0.4,
+            "confidence_label": "Not Enough Information",
+            "status": "fallback",
+            "source_used": False,
+            "needs_human": True,
+            "sources": [],
+            "source_text": None,
         }
 
-    if "menu" in lower or "ramen" in lower:
+    q_tokens = tokenize(message)
+    if not q_tokens:
         return {
-            "answer": ["We serve Tonkotsu Shio, Spicy Miso, Yuzu Shoyu, and Vegan Shiitake."],
-            "confidence": 0.82,
-            "confidence_label": "High Confidence",
-            "status": "answered",
-            "source_used": True,
-            "needs_human": False,
-            "source_text": "Sakura_Ramen_Info.pdf · page 3 - Menu",
+            "answer": fallback_message,
+            "confidence": 0.4,
+            "confidence_label": "Not Enough Information",
+            "status": "fallback",
+            "source_used": False,
+            "needs_human": True,
+            "sources": [],
+            "source_text": None,
         }
 
-    risk_keywords = ["price", "refund", "guarantee", "legal", "medical", "financial", "availability", "contract", "warranty", "latest"]
-    if any(k in lower for k in risk_keywords):
+    q_counts = Counter(q_tokens)
+    scored: list[tuple[float, sqlite3.Row]] = []
+    for row in rows:
+        c_tokens = tokenize(row["chunk_text"] or "")
+        if not c_tokens:
+            continue
+        c_counts = Counter(c_tokens)
+        overlap = sum(min(q_counts[k], c_counts[k]) for k in q_counts.keys())
+        denom = max(1, len(set(q_tokens)))
+        score = overlap / denom
+        if score > 0:
+            scored.append((score, row))
+
+    if not scored:
         return {
-            "answer": [FALLBACK_MESSAGE],
+            "answer": fallback_message,
             "confidence": 0.45,
             "confidence_label": "Not Enough Information",
             "status": "fallback",
             "source_used": False,
             "needs_human": True,
+            "sources": [],
             "source_text": None,
         }
 
+    scored.sort(key=lambda x: x[0], reverse=True)
+    best_score, best_row = scored[0]
+    confidence = min(0.95, 0.45 + (best_score * 0.5))
+    answered = confidence >= threshold
+    status = "answered" if answered else "fallback"
+    answer_text = (best_row["chunk_text"] or "").strip()
+    if not answered:
+        answer_text = fallback_message
+
+    sources = []
+    if answered:
+        sources.append({"file_name": best_row["file_name"] or "uploaded_file.txt", "chunk_id": best_row["chunk_id"]})
+
     return {
-        "answer": [FALLBACK_MESSAGE],
-        "confidence": 0.4,
-        "confidence_label": "Not Enough Information",
-        "status": "fallback",
-        "source_used": False,
-        "needs_human": True,
-        "source_text": None,
+        "answer": answer_text,
+        "confidence": round(confidence, 2),
+        "confidence_label": confidence_label(confidence),
+        "status": status,
+        "source_used": answered,
+        "needs_human": not answered,
+        "sources": sources,
+        "source_text": answer_text if answered else None,
     }
 
 
