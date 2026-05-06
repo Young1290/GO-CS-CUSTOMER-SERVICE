@@ -3,6 +3,7 @@
 import argparse
 import cgi
 import json
+import math
 import re
 import sqlite3
 import threading
@@ -13,7 +14,7 @@ from http import HTTPStatus
 from http.server import SimpleHTTPRequestHandler
 from pathlib import Path
 from socketserver import ThreadingTCPServer
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import urlparse
 
 ROOT = Path(__file__).resolve().parent
 DB_PATH = ROOT / "gocs.db"
@@ -28,6 +29,11 @@ WORD_RE = re.compile(r"[a-z0-9]+")
 STOPWORDS = {
     "a", "an", "and", "are", "as", "at", "be", "by", "for", "from", "how", "i", "in", "is", "it", "of",
     "on", "or", "that", "the", "this", "to", "we", "what", "when", "where", "who", "why", "with", "you", "your",
+}
+VECTOR_DIMS = 256
+RISK_KEYWORDS = {
+    "price", "pricing", "refund", "guarantee", "legal", "medical",
+    "financial", "availability", "contract", "latest", "warranty", "promise",
 }
 
 
@@ -184,6 +190,39 @@ def confidence_label(confidence: float) -> str:
     if confidence >= 0.6:
         return "Medium Confidence"
     return "Not Enough Information"
+
+
+def embed_text(text: str, dims: int = VECTOR_DIMS) -> list[float]:
+    vec = [0.0] * dims
+    tokens = tokenize(text)
+    if not tokens:
+        return vec
+    for token in tokens:
+        idx = hash(token) % dims
+        vec[idx] += 1.0
+    norm = math.sqrt(sum(v * v for v in vec))
+    if norm <= 0:
+        return vec
+    return [v / norm for v in vec]
+
+
+def cosine_similarity(a: list[float], b: list[float]) -> float:
+    if not a or not b:
+        return 0.0
+    n = min(len(a), len(b))
+    return sum(a[i] * b[i] for i in range(n))
+
+
+def parse_embedding(embedding_json: str | None) -> list[float]:
+    if not embedding_json:
+        return []
+    try:
+        data = json.loads(embedding_json)
+        if isinstance(data, list):
+            return [float(x) for x in data]
+    except Exception:
+        return []
+    return []
 
 
 class GoCSHandler(SimpleHTTPRequestHandler):
@@ -367,6 +406,7 @@ class GoCSHandler(SimpleHTTPRequestHandler):
                     (file_id, bot_id, source_name, "txt", None, combined_text, "processed", created),
                 )
                 for idx, piece in enumerate(chunk_text(combined_text)):
+                    chunk_embedding = embed_text(piece)
                     conn.execute(
                         """
                         insert into knowledge_chunks (id,bot_id,file_id,chunk_text,chunk_index,embedding,metadata,created_at)
@@ -378,7 +418,7 @@ class GoCSHandler(SimpleHTTPRequestHandler):
                             file_id,
                             piece,
                             idx,
-                            None,
+                            json.dumps(chunk_embedding),
                             json.dumps({"strategy": "char_window", "chunk_size": 500, "overlap": 100}),
                             created,
                         ),
@@ -591,7 +631,7 @@ def conn_source_name(public_token: str) -> str | None:
 def compute_answer(conn: sqlite3.Connection, bot_id: str, message: str, fallback_message: str, threshold: float) -> dict:
     rows = conn.execute(
         """
-        select kc.id as chunk_id, kc.chunk_text, coalesce(kf.file_name, '') as file_name
+        select kc.id as chunk_id, kc.chunk_text, kc.embedding, coalesce(kf.file_name, '') as file_name
         from knowledge_chunks kc
         left join knowledge_files kf on kf.id = kc.file_id
         where kc.bot_id = ?
@@ -624,18 +664,27 @@ def compute_answer(conn: sqlite3.Connection, bot_id: str, message: str, fallback
             "source_text": None,
         }
 
-    q_counts = Counter(q_tokens)
-    scored: list[tuple[float, sqlite3.Row]] = []
+    query_embedding = embed_text(message)
+    q_counts = Counter(q_tokens)  # fallback tie-breaker and cold-start fallback
+    scored: list[tuple[float, float, sqlite3.Row]] = []
     for row in rows:
-        c_tokens = tokenize(row["chunk_text"] or "")
-        if not c_tokens:
+        chunk_text = row["chunk_text"] or ""
+        c_tokens = tokenize(chunk_text)
+        if not c_tokens and not chunk_text.strip():
             continue
+
+        # Primary: vector similarity.
+        chunk_embedding = parse_embedding(row["embedding"])
+        vec_score = cosine_similarity(query_embedding, chunk_embedding) if chunk_embedding else 0.0
+
+        # Secondary fallback/tie-breaker: keyword overlap.
         c_counts = Counter(c_tokens)
         overlap = sum(min(q_counts[k], c_counts[k]) for k in q_counts.keys())
-        denom = max(1, len(set(q_tokens)))
-        score = overlap / denom
-        if score > 0:
-            scored.append((score, row))
+        overlap_score = overlap / max(1, len(set(q_tokens)))
+
+        final_score = max(vec_score, overlap_score * 0.85)
+        if final_score > 0:
+            scored.append((final_score, vec_score, row))
 
     if not scored:
         return {
@@ -649,10 +698,13 @@ def compute_answer(conn: sqlite3.Connection, bot_id: str, message: str, fallback
             "source_text": None,
         }
 
-    scored.sort(key=lambda x: x[0], reverse=True)
-    best_score, best_row = scored[0]
-    confidence = min(0.95, 0.45 + (best_score * 0.5))
-    answered = confidence >= threshold
+    scored.sort(key=lambda x: (x[0], x[1]), reverse=True)
+    best_score, vec_component, best_row = scored[0]
+    confidence = min(0.95, 0.35 + (best_score * 0.65))
+
+    risk_question = any(k in message.lower() for k in RISK_KEYWORDS)
+    required_threshold = max(threshold, 0.78) if risk_question else threshold
+    answered = confidence >= required_threshold
     status = "answered" if answered else "fallback"
     answer_text = (best_row["chunk_text"] or "").strip()
     if not answered:

@@ -65,7 +65,7 @@ Stop server with `Ctrl+C`.
 
 1. No auth/workspace/billing layer yet.
 2. File upload parsing/chunking is simplified (basic ingestion + heuristic retrieval).
-3. Retrieval uses keyword-overlap scoring; no embedding/vector index yet.
+3. Retrieval uses lightweight local vector similarity (hashed embedding) with keyword fallback; no external vector DB yet.
 4. Telegram connection is stored as placeholder config; no external Telegram API registration yet.
 5. WhatsApp/Facebook options are placeholder UI only.
 6. Widget endpoint returns bootstrap JS only (no production widget bundle).
