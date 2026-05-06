@@ -233,6 +233,7 @@ function GeneratingPage({ session, onDone }) {
 
   const [step, setStep] = useState(0);
   const [failed, setFailed] = useState(false);
+  const injectFailure = window.GOCS_DEMO_GENERATING_FAILURE === true;
 
   useEffect(() => {
     if (failed) return;
@@ -241,14 +242,14 @@ function GeneratingPage({ session, onDone }) {
       return () => clearTimeout(t);
     }
     const t = setTimeout(() => {
-      if (step === 1 && Math.random() < 0.18) {
+      if (injectFailure && step === 1) {
         setFailed(true);
         return;
       }
       setStep(step + 1);
-    }, 650 + Math.random() * 250);
+    }, 750);
     return () => clearTimeout(t);
-  }, [step, failed]);
+  }, [step, failed, injectFailure]);
 
   const retry = () => {
     setFailed(false);
@@ -305,7 +306,8 @@ function ConfidenceBadge({ level }) {
   return <span className={`gocs-badge gocs-badge-${c.cls}`}><span className="gocs-badge-dot" />{c.label}</span>;
 }
 
-function scoreToLevel(score) {
+function scoreToLevel(score, status) {
+  if (status === 'fallback') return 'low';
   if (score >= 0.8) return 'high';
   if (score >= 0.6) return 'medium';
   return 'low';
@@ -349,7 +351,7 @@ function TestChatPage({ publicToken, service, onShare, onAddInfo }) {
       setMessages((m) => [...m, {
         role: 'ai',
         text: Array.isArray(payload.answer) ? payload.answer : [payload.answer],
-        confidence: scoreToLevel(payload.confidence),
+        confidence: scoreToLevel(payload.confidence, payload.status),
         source: payload.source_text,
       }]);
     } finally {

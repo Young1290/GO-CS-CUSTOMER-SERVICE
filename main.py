@@ -57,6 +57,7 @@ MAX_BODY_BYTES = int(os.getenv("GOCS_MAX_BODY_BYTES", str(5 * 1024 * 1024)))
 RATE_LIMIT_PER_MIN = int(os.getenv("GOCS_RATE_LIMIT_PER_MIN", "180"))
 DEFAULT_BIND_HOST = os.getenv("HOST", "0.0.0.0")
 CORS_ALLOW_ORIGIN = os.getenv("GOCS_CORS_ALLOW_ORIGIN", "*")
+TELEGRAM_TOKEN_RE = re.compile(r"^\d{6,}:[\w-]{20,}$")
 
 
 def trim_rate_state(now_ts: float) -> None:
@@ -551,7 +552,7 @@ class GoCSHandler(SimpleHTTPRequestHandler):
                         bot_id,
                         "AI Customer Service",
                         payload.get("owner_email"),
-                        "ready",
+                        "processing",
                         "upload",
                         "knowledge_only",
                         business_type,
@@ -590,6 +591,7 @@ class GoCSHandler(SimpleHTTPRequestHandler):
                             created,
                         ),
                     )
+                conn.execute("update bots set status = ?, updated_at = ? where id = ?", ("ready", now_iso(), bot_id))
                 conn.commit()
             finally:
                 conn.close()
@@ -656,6 +658,11 @@ class GoCSHandler(SimpleHTTPRequestHandler):
         message = str(payload.get("message") or "").strip()
         if not message:
             return self._send_json(err("VALIDATION_ERROR", "message is required", [{"field": "message", "issue": "required"}]), HTTPStatus.BAD_REQUEST)
+        if len(message) > 2000:
+            return self._send_json(
+                err("VALIDATION_ERROR", "message must be 1..2000 characters", [{"field": "message", "issue": "max_length"}]),
+                HTTPStatus.BAD_REQUEST,
+            )
 
         with DB_LOCK:
             conn = db_connect()
@@ -664,6 +671,11 @@ class GoCSHandler(SimpleHTTPRequestHandler):
                 bot = conn.execute("select * from bots where public_token = ?", (public_token,)).fetchone()
                 if not bot:
                     return self._send_json(err("NOT_FOUND", "Bot not found", [{"field": "publicToken", "issue": "not_found"}]), HTTPStatus.NOT_FOUND)
+                if str(bot["status"] or "").lower() != "ready":
+                    return self._send_json(
+                        err("BOT_NOT_READY", "Bot is still processing uploaded knowledge", [{"field": "status", "issue": "processing"}]),
+                        HTTPStatus.CONFLICT,
+                    )
 
                 raw_conv_id = str(payload.get("conversation_id") or "").strip()
                 conv_id = raw_conv_id or str(uuid.uuid4())
@@ -711,6 +723,17 @@ class GoCSHandler(SimpleHTTPRequestHandler):
         return self._send_json(ok({"conversation_id": conv_id, **answer_data}))
 
     def _handle_widget(self, public_token: str) -> None:
+        with DB_LOCK:
+            conn = db_connect()
+            conn.row_factory = sqlite3.Row
+            try:
+                bot = conn.execute("select id from bots where public_token = ?", (public_token,)).fetchone()
+                if not bot:
+                    self._send_json(err("NOT_FOUND", "Bot not found"), HTTPStatus.NOT_FOUND)
+                    return
+            finally:
+                conn.close()
+
         script = (
             "(function(){window.GOCS_WIDGET={"
             f"publicToken:'{public_token}',"
@@ -732,6 +755,22 @@ class GoCSHandler(SimpleHTTPRequestHandler):
                 err("VALIDATION_ERROR", "public_token and telegram_bot_token are required", [{"field": "telegram_bot_token", "issue": "required"}]),
                 HTTPStatus.BAD_REQUEST,
             )
+        if not TELEGRAM_TOKEN_RE.match(tg_token):
+            return self._send_json(
+                err("VALIDATION_ERROR", "Invalid Telegram token format", [{"field": "telegram_bot_token", "issue": "invalid_format"}]),
+                HTTPStatus.BAD_REQUEST,
+            )
+
+        webhook_base = str(payload.get("webhook_base_url") or "").strip().rstrip("/")
+        if webhook_base and not webhook_base.startswith(("http://", "https://")):
+            return self._send_json(
+                err("VALIDATION_ERROR", "webhook_base_url must be a valid URL", [{"field": "webhook_base_url", "issue": "invalid_url"}]),
+                HTTPStatus.BAD_REQUEST,
+            )
+        if not webhook_base:
+            proto = (self.headers.get("X-Forwarded-Proto") or "http").strip()
+            host = (self.headers.get("Host") or f"127.0.0.1:{self.server.server_address[1]}").strip()
+            webhook_base = f"{proto}://{host}"
 
         with DB_LOCK:
             conn = db_connect()
@@ -754,7 +793,7 @@ class GoCSHandler(SimpleHTTPRequestHandler):
                     "public_token": public_token,
                     "telegram": {
                         "connected": True,
-                        "webhook_url": f"/api/webhooks/telegram/{public_token}",
+                        "webhook_url": f"{webhook_base}/api/webhooks/telegram/{public_token}",
                         "bot_username": "demo_placeholder_bot",
                     },
                 }
@@ -763,7 +802,7 @@ class GoCSHandler(SimpleHTTPRequestHandler):
 
     def _handle_telegram_webhook(self, public_token: str) -> None:
         with DB_LOCK:
-            conn = sqlite3.connect(DB_PATH)
+            conn = db_connect()
             conn.row_factory = sqlite3.Row
             try:
                 bot = conn.execute("select id from bots where public_token = ?", (public_token,)).fetchone()
@@ -926,7 +965,7 @@ class ReusableThreadingTCPServer(ThreadingTCPServer):
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run GO!CS prototype locally (frontend + API + DB).")
-    parser.add_argument("--port", type=int, default=3000, help="HTTP port (default: 3000)")
+    parser.add_argument("--port", type=int, default=0, help="HTTP port (default from PORT env or 3000)")
     parser.add_argument("--host", type=str, default="", help="Bind host (default from HOST env or 0.0.0.0)")
     args = parser.parse_args()
 
@@ -936,10 +975,11 @@ def main() -> None:
     RATE_LIMIT_PER_MIN = env_int("GOCS_RATE_LIMIT_PER_MIN", 180, 10, 10000)
     CORS_ALLOW_ORIGIN = (os.getenv("GOCS_CORS_ALLOW_ORIGIN", "*") or "*").strip()
     bind_host = (args.host or os.getenv("HOST", DEFAULT_BIND_HOST) or DEFAULT_BIND_HOST).strip()
+    port = args.port if args.port > 0 else env_int("PORT", 3000, 1, 65535)
     ensure_db()
 
-    with ReusableThreadingTCPServer((bind_host, args.port), GoCSHandler) as httpd:
-        print(f"GO!CS prototype running at http://{bind_host}:{args.port}")
+    with ReusableThreadingTCPServer((bind_host, port), GoCSHandler) as httpd:
+        print(f"GO!CS prototype running at http://{bind_host}:{port}")
         print(f"SQLite database ready at: {DB_PATH}")
         print(f"API limits: max_body_bytes={MAX_BODY_BYTES}, rate_limit_per_min={RATE_LIMIT_PER_MIN}")
         try:
