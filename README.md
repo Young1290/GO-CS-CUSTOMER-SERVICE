@@ -79,7 +79,8 @@ Stop server with `Ctrl+C`.
 
 File extraction note:
 1. `txt/md/csv/json/log` uploads are parsed directly.
-2. `pdf` extraction is attempted when `pypdf` is installed; otherwise fallback decoding is used.
+2. `docx` extraction is supported using built-in XML parsing.
+3. `pdf` extraction is attempted when `pypdf` is installed; otherwise fallback decoding is used.
 
 ## 6) Execution Checklist (Demo)
 

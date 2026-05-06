@@ -9,13 +9,16 @@ import re
 import sqlite3
 import threading
 import uuid
+import zipfile
 from collections import Counter
 from datetime import datetime, timezone
 from http import HTTPStatus
 from http.server import SimpleHTTPRequestHandler
+from io import BytesIO
 from pathlib import Path
 from socketserver import ThreadingTCPServer
 from urllib.parse import urlparse
+import xml.etree.ElementTree as ET
 
 ROOT = Path(__file__).resolve().parent
 DB_PATH = ROOT / "gocs.db"
@@ -85,7 +88,6 @@ def extract_uploaded_text(filename: str, content_type: str, file_bytes: bytes) -
 
     if name.endswith(".pdf"):
         try:
-            from io import BytesIO
             from pypdf import PdfReader  # type: ignore
 
             reader = PdfReader(BytesIO(file_bytes))
@@ -95,6 +97,17 @@ def extract_uploaded_text(filename: str, content_type: str, file_bytes: bytes) -
                 if text.strip():
                     pages.append(text.strip())
             return "\n\n".join(pages)
+        except Exception:
+            return file_bytes.decode("utf-8", errors="ignore")
+
+    if name.endswith(".docx"):
+        try:
+            with zipfile.ZipFile(BytesIO(file_bytes)) as zf:
+                xml_data = zf.read("word/document.xml")
+            root = ET.fromstring(xml_data)
+            ns = {"w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"}
+            texts = [node.text for node in root.findall(".//w:t", ns) if node.text]
+            return "\n".join(texts)
         except Exception:
             return file_bytes.decode("utf-8", errors="ignore")
 
