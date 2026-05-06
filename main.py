@@ -35,6 +35,17 @@ RISK_KEYWORDS = {
     "price", "pricing", "refund", "guarantee", "legal", "medical",
     "financial", "availability", "contract", "latest", "warranty", "promise",
 }
+TOKEN_CANONICAL = {
+    "opening": "hours",
+    "open": "hours",
+    "close": "hours",
+    "closing": "hours",
+    "cost": "price",
+    "charges": "price",
+    "fee": "price",
+    "fees": "price",
+    "refunds": "refund",
+}
 
 
 def extract_uploaded_text(filename: str, content_type: str, file_bytes: bytes) -> str:
@@ -180,7 +191,8 @@ def chunk_text(raw_text: str, chunk_size: int = 500, overlap: int = 100) -> list
 
 
 def tokenize(text: str) -> list[str]:
-    tokens = [t for t in WORD_RE.findall((text or "").lower()) if t not in STOPWORDS and len(t) > 1]
+    raw = [t for t in WORD_RE.findall((text or "").lower()) if t not in STOPWORDS and len(t) > 1]
+    tokens = [TOKEN_CANONICAL.get(t, t) for t in raw]
     return tokens
 
 
@@ -290,6 +302,8 @@ class GoCSHandler(SimpleHTTPRequestHandler):
         path = parsed.path
 
         if path.startswith("/api/"):
+            if path == "/api/health":
+                return self._send_json(ok({"status": "ok", "db_path": str(DB_PATH)}))
             if path.startswith("/api/bot/"):
                 token = path.split("/")[3] if len(path.split("/")) > 3 else ""
                 return self._handle_get_bot(token)

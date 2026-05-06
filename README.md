@@ -30,6 +30,7 @@ Stop server with `Ctrl+C`.
 - `main.py` serves files from repo root and provides SPA fallback to `index.html`.
 - Unknown frontend routes resolve to the single-page app.
 - Built-in backend endpoints are available under `/api/*` and `/widget/*`.
+- Health endpoint: `GET /api/health`.
 - Frontend is loaded via script tags in `index.html` and compiled in-browser using Babel.
 - Session state is stored in browser `localStorage` under `gocs_demo_session`.
 - SQLite database is auto-initialized at startup as `gocs.db`.
