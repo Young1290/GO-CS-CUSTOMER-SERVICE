@@ -64,8 +64,8 @@ Stop server with `Ctrl+C`.
 ## 5) Known Limits (Current State)
 
 1. No auth/workspace/billing layer yet.
-2. File upload parsing/chunking is simplified (mocked content path for MVP).
-3. AI responses are keyword-matched mock responses from `chat-data.jsx`.
+2. File upload parsing/chunking is simplified (basic ingestion + heuristic retrieval).
+3. Retrieval uses keyword-overlap scoring; no embedding/vector index yet.
 4. Telegram connection is stored as placeholder config; no external Telegram API registration yet.
 5. WhatsApp/Facebook options are placeholder UI only.
 6. Widget endpoint returns bootstrap JS only (no production widget bundle).
@@ -93,17 +93,14 @@ For operations and troubleshooting, see [RUNBOOK.md](/d:/LDE%20Customer%20Servic
 
 ## 7) Next Implementation Steps
 
-1. Harden API integration coverage in `gocs-service.jsx`:
-   - Keep envelope normalization resilient for non-JSON/partial backend failures
-   - Extend contract validation and client-side error surfacing for `/api/*` flows
-2. Add real document ingestion pipeline (PDF/DOC/TXT parse + chunk + embed + retrieval).
-3. Add backend session and bot persistence with durable IDs/tokens.
-4. Add auth/org workspace model for bot ownership.
-5. Replace mock confidence with retrieval/evaluation scoring.
-6. Implement real widget endpoint and hosted script path under `/widget/*`.
-7. Add test coverage:
+1. Add embedding/vector retrieval and confidence calibration.
+2. Expand document ingestion quality (DOCX/XLSX + stronger PDF extraction).
+3. Add auth/org workspace model for bot ownership.
+4. Implement Telegram real API registration + webhook verification.
+5. Implement production widget bundle and hosted assets under `/widget/*`.
+6. Add test coverage:
    - route parsing and navigation
    - fallback/retrieval behavior
    - share/connect form validation
-8. Productionize frontend build (Vite/Next/etc.) and remove in-browser Babel.
-9. Add observability (API logs, latency, error rates, fallback rate, unsafe query rate).
+7. Productionize frontend build (Vite/Next/etc.) and remove in-browser Babel.
+8. Add observability (API logs, latency, error rates, fallback rate, unsafe query rate).
